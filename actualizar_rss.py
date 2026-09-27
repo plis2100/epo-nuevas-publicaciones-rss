@@ -2,7 +2,6 @@ import hashlib
 import html
 import json
 import re
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -16,182 +15,62 @@ import requests
 from bs4 import BeautifulSoup
 
 
-# ============================================================
-# CONFIGURACIÓN
-# ============================================================
-
-USUARIO_GITHUB = "plis2100"
+USUARIO = "plis2100"
 REPOSITORIO = "epo-nuevas-publicaciones-rss"
 
-BASE_API = (
-    "https://data.epo.org/"
-    "publication-server/rest/v1.2"
-)
-
-URL_FECHAS = (
-    f"{BASE_API}/publication-dates"
-)
-
-URL_EPO = (
-    "https://data.epo.org/"
-    "publication-server/"
-)
+BASE = "https://data.epo.org/publication-server/rest/v1.2"
+URL_FECHAS = f"{BASE}/publication-dates"
 
 URL_RSS = (
-    "https://raw.githubusercontent.com/"
-    f"{USUARIO_GITHUB}/{REPOSITORIO}/"
-    "main/feed.xml"
+    f"https://raw.githubusercontent.com/{USUARIO}/"
+    f"{REPOSITORIO}/main/epo-feed-v2.xml"
 )
 
-ARCHIVO_RSS = Path("feed.xml")
+ARCHIVO_RSS = Path("epo-feed-v2.xml")
 ARCHIVO_HISTORIAL = Path("historial.json")
 
-MAXIMO_PUBLICACIONES_SEMANA = 1000
-MAXIMO_ENTRADAS_RSS = 2000
-MAXIMO_TRABAJADORES = 8
+MAX_PUBLICACIONES = 1000
+MAX_ENTRADAS = 2000
+TRABAJADORES = 8
 
-ZONA_HORARIA = ZoneInfo("Europe/Madrid")
+MADRID = ZoneInfo("Europe/Madrid")
 
 CABECERAS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 Chrome/136.0 Safari/537.36"
+        "Chrome/136.0 Safari/537.36"
     ),
-    "Accept": (
-        "application/xml,text/xml,text/html,"
-        "application/xhtml+xml;q=0.9,*/*;q=0.8"
-    ),
-    "Accept-Language": "en-GB,en;q=0.9,es;q=0.8",
+    "Accept": "application/xml,text/xml,text/html,*/*",
+    "Accept-Language": "en,es;q=0.9",
 }
 
 
-# ============================================================
-# FUNCIONES AUXILIARES
-# ============================================================
-
 def limpiar(valor):
-    if valor is None:
-        return ""
-
-    return " ".join(str(valor).split()).strip()
+    return " ".join(str(valor or "").split()).strip()
 
 
-def fecha_rss(fecha):
-    if fecha is None:
-        fecha = datetime.now(timezone.utc)
-
-    if fecha.tzinfo is None:
-        fecha = fecha.replace(
-            tzinfo=timezone.utc
-        )
-
-    return format_datetime(
-        fecha.astimezone(timezone.utc)
-    )
+def local(etiqueta):
+    return etiqueta.rsplit("}", 1)[-1]
 
 
-def fecha_iso_desde_epo(valor):
-    texto = limpiar(valor)
+def elementos(raiz, nombre):
+    return [
+        elemento
+        for elemento in raiz.iter()
+        if local(elemento.tag).lower() == nombre.lower()
+    ]
 
-    coincidencia = re.search(
-        r"(\d{4})(\d{2})(\d{2})",
-        texto,
-    )
-
-    if not coincidencia:
-        return datetime.now(
-            ZONA_HORARIA
-        )
-
-    anio, mes, dia = coincidencia.groups()
-
-    return datetime(
-        int(anio),
-        int(mes),
-        int(dia),
-        14,
-        0,
-        tzinfo=ZONA_HORARIA,
-    )
-
-
-def nombre_local(etiqueta):
-    if "}" in etiqueta:
-        return etiqueta.split("}", 1)[1]
-
-    return etiqueta
-
-
-def elementos_por_nombre(raiz, nombre):
-    resultado = []
-
-    for elemento in raiz.iter():
-        if nombre_local(
-            elemento.tag
-        ).lower() == nombre.lower():
-            resultado.append(elemento)
-
-    return resultado
-
-
-def clasificar_tipo(codigo):
-    codigo = limpiar(codigo).upper()
-
-    if codigo.startswith("A1"):
-        return "NUEVA SOLICITUD"
-
-    if codigo.startswith("A2"):
-        return "SOLICITUD SIN INFORME DE BÚSQUEDA"
-
-    if codigo.startswith("A3"):
-        return "INFORME DE BÚSQUEDA"
-
-    if codigo.startswith("A8"):
-        return "CORRECCIÓN DE SOLICITUD"
-
-    if codigo.startswith("A9"):
-        return "CORRECCIÓN DE SOLICITUD"
-
-    if codigo.startswith("B1"):
-        return "PATENTE CONCEDIDA"
-
-    if codigo.startswith("B2"):
-        return "PATENTE MODIFICADA"
-
-    if codigo.startswith("B3"):
-        return "PATENTE MODIFICADA"
-
-    if codigo.startswith("B8"):
-        return "CORRECCIÓN DE PATENTE"
-
-    if codigo.startswith("B9"):
-        return "CORRECCIÓN DE PATENTE"
-
-    return f"PUBLICACIÓN {codigo}"
-
-
-# ============================================================
-# SESIÓN HTTP
-# ============================================================
 
 def crear_sesion():
     sesion = requests.Session()
     sesion.headers.update(CABECERAS)
-
     return sesion
 
 
-def descargar_con_reintentos(
-    sesion,
-    url,
-    intentos=3,
-):
+def descargar(sesion, url, intentos=3):
     ultimo_error = None
 
-    for intento in range(
-        1,
-        intentos + 1,
-    ):
+    for intento in range(1, intentos + 1):
         try:
             respuesta = sesion.get(
                 url,
@@ -201,10 +80,7 @@ def descargar_con_reintentos(
             respuesta.raise_for_status()
 
             if not respuesta.content:
-                raise RuntimeError(
-                    "La EPO devolvió una "
-                    "respuesta vacía."
-                )
+                raise RuntimeError("Respuesta vacía")
 
             return respuesta
 
@@ -215,88 +91,29 @@ def descargar_con_reintentos(
             ultimo_error = error
 
             if intento < intentos:
-                time.sleep(
-                    intento * 2
-                )
+                time.sleep(intento * 2)
 
     raise RuntimeError(
-        f"No se pudo descargar {url}: "
-        f"{ultimo_error}"
+        f"No se pudo descargar {url}: {ultimo_error}"
     )
 
 
-# ============================================================
-# ÚLTIMA FECHA DE PUBLICACIÓN
-# ============================================================
-
-def obtener_ultima_fecha_publicacion():
-    sesion = crear_sesion()
-
-    respuesta = descargar_con_reintentos(
-        sesion,
+def obtener_ultima_fecha():
+    respuesta = descargar(
+        crear_sesion(),
         URL_FECHAS,
     )
 
-    sopa = BeautifulSoup(
-        respuesta.text,
-        "html.parser",
+    fechas = set(
+        re.findall(
+            r"(?:publication-dates/|\b)"
+            r"(20\d{6})(?:/|\b)",
+            respuesta.text,
+        )
     )
 
-    fechas = set()
-
-    for enlace in sopa.find_all(
-        "a",
-        href=True,
-    ):
-        href = enlace.get(
-            "href",
-            "",
-        )
-
-        coincidencias = re.findall(
-            r"/publication-dates/"
-            r"(\d{8})(?:/|$)",
-            href,
-        )
-
-        for fecha in coincidencias:
-            fechas.add(fecha)
-
-        texto = limpiar(
-            enlace.get_text(
-                " ",
-                strip=True,
-            )
-        )
-
-        coincidencia_texto = re.fullmatch(
-            r"(\d{4})[/-](\d{2})[/-](\d{2})",
-            texto,
-        )
-
-        if coincidencia_texto:
-            fechas.add(
-                "".join(
-                    coincidencia_texto.groups()
-                )
-            )
-
-    if not fechas:
-        fechas.update(
-            re.findall(
-                r"\b20\d{6}\b",
-                respuesta.text,
-            )
-        )
-
-    if not fechas:
-        raise RuntimeError(
-            "No se encontró ninguna fecha "
-            "de publicación en la EPO."
-        )
-
     hoy = datetime.now(
-        ZONA_HORARIA
+        MADRID
     ).strftime("%Y%m%d")
 
     fechas_validas = [
@@ -307,36 +124,24 @@ def obtener_ultima_fecha_publicacion():
 
     if not fechas_validas:
         raise RuntimeError(
-            "No se encontró una fecha "
-            "de publicación válida."
+            "No se encontraron fechas de publicación EPO"
         )
 
-    ultima_fecha = max(
-        fechas_validas
-    )
+    fecha = max(fechas_validas)
 
-    print(
-        "Última publicación EPO: "
-        f"{ultima_fecha}"
-    )
+    print(f"Última fecha EPO: {fecha}")
 
-    return ultima_fecha
+    return fecha
 
 
-# ============================================================
-# LISTADO SEMANAL
-# ============================================================
-
-def obtener_listado_semanal(fecha):
+def obtener_listado(fecha):
     url = (
-        f"{BASE_API}/publication-dates/"
+        f"{BASE}/publication-dates/"
         f"{fecha}/patents"
     )
 
-    sesion = crear_sesion()
-
-    respuesta = descargar_con_reintentos(
-        sesion,
+    respuesta = descargar(
+        crear_sesion(),
         url,
     )
 
@@ -345,85 +150,54 @@ def obtener_listado_semanal(fecha):
         "html.parser",
     )
 
-    identificadores = []
+    resultado = []
     vistos = set()
 
     for enlace in sopa.find_all(
         "a",
         href=True,
     ):
-        href = urljoin(
+        destino = urljoin(
             respuesta.url,
-            enlace.get(
-                "href",
-                "",
-            ),
+            enlace["href"],
         )
 
         coincidencia = re.search(
-            r"/patents/"
-            r"([^/?#]+)$",
-            href,
-            flags=re.IGNORECASE,
+            r"/patents/([^/?#]+)$",
+            destino,
+            re.IGNORECASE,
         )
 
         if not coincidencia:
             continue
 
-        identificador = limpiar(
-            coincidencia.group(1)
-        )
+        identificador = coincidencia.group(1)
 
-        if not identificador:
-            continue
+        if identificador not in vistos:
+            vistos.add(identificador)
+            resultado.append(identificador)
 
-        if identificador in vistos:
-            continue
-
-        vistos.add(identificador)
-
-        identificadores.append(
-            identificador
-        )
-
-    if not identificadores:
+    if not resultado:
         raise RuntimeError(
-            "La EPO no devolvió publicaciones "
-            f"para {fecha}."
+            f"No hay publicaciones para {fecha}"
         )
 
     print(
-        "Publicaciones encontradas: "
-        f"{len(identificadores)}"
+        f"Publicaciones encontradas: {len(resultado)}"
     )
 
-    if (
-        len(identificadores)
-        > MAXIMO_PUBLICACIONES_SEMANA
-    ):
+    if len(resultado) > MAX_PUBLICACIONES:
         print(
-            "Se procesarán las primeras "
-            f"{MAXIMO_PUBLICACIONES_SEMANA}."
+            f"Se procesarán las primeras "
+            f"{MAX_PUBLICACIONES} publicaciones"
         )
 
-    return identificadores[
-        :MAXIMO_PUBLICACIONES_SEMANA
-    ]
+    return resultado[:MAX_PUBLICACIONES]
 
 
-# ============================================================
-# EXTRACCIÓN DEL DOCUMENTO XML
-# ============================================================
-
-def obtener_codigo_publicacion(
-    raiz,
-    identificador,
-):
+def obtener_codigo(raiz, identificador):
     codigo = limpiar(
-        raiz.attrib.get(
-            "kind",
-            "",
-        )
+        raiz.attrib.get("kind")
     ).upper()
 
     if codigo:
@@ -433,26 +207,18 @@ def obtener_codigo_publicacion(
         r"(A1|A2|A3|A8|A9|"
         r"B1|B2|B3|B8|B9)$",
         identificador,
-        flags=re.IGNORECASE,
+        re.IGNORECASE,
     )
 
     if coincidencia:
-        return coincidencia.group(
-            1
-        ).upper()
+        return coincidencia.group(1).upper()
 
     return ""
 
 
-def obtener_numero_publicacion(
-    raiz,
-    identificador,
-):
+def obtener_numero(raiz, identificador):
     numero = limpiar(
-        raiz.attrib.get(
-            "doc-number",
-            "",
-        )
+        raiz.attrib.get("doc-number")
     )
 
     if numero:
@@ -461,7 +227,7 @@ def obtener_numero_publicacion(
     coincidencia = re.search(
         r"EP0*(\d+)",
         identificador,
-        flags=re.IGNORECASE,
+        re.IGNORECASE,
     )
 
     if coincidencia:
@@ -470,72 +236,54 @@ def obtener_numero_publicacion(
     return identificador
 
 
-def obtener_fecha_documento(
-    raiz,
-    fecha_semanal,
-):
+def obtener_fecha(raiz, alternativa):
     fecha = limpiar(
-        raiz.attrib.get(
-            "date-publ",
-            "",
-        )
+        raiz.attrib.get("date-publ")
     )
 
-    if re.fullmatch(
-        r"\d{8}",
-        fecha,
-    ):
+    if re.fullmatch(r"\d{8}", fecha):
         return fecha
 
-    for elemento in elementos_por_nombre(
-        raiz,
-        "date",
-    ):
+    for elemento in raiz.iter():
         texto = limpiar(
-            "".join(
-                elemento.itertext()
-            )
+            "".join(elemento.itertext())
         )
 
         coincidencia = re.search(
-            r"\b\d{8}\b",
+            r"\b(20\d{6})\b",
             texto,
         )
 
         if coincidencia:
-            return coincidencia.group(0)
+            return coincidencia.group(1)
 
-    return fecha_semanal
+    return alternativa
 
 
 def obtener_titulo(raiz):
     titulos = []
-    idioma_actual = ""
 
-    for bloque in elementos_por_nombre(
+    for bloque in elementos(
         raiz,
         "B540",
     ):
-        for elemento in list(bloque):
-            etiqueta = nombre_local(
+        idioma = ""
+
+        for elemento in bloque.iter():
+            etiqueta = local(
                 elemento.tag
             ).upper()
 
             texto = limpiar(
-                "".join(
-                    elemento.itertext()
-                )
+                "".join(elemento.itertext())
             )
 
             if etiqueta == "B541":
-                idioma_actual = texto.lower()
+                idioma = texto.lower()
 
             elif etiqueta == "B542" and texto:
                 titulos.append(
-                    (
-                        idioma_actual,
-                        texto,
-                    )
+                    (idioma, texto)
                 )
 
     for idioma, titulo in titulos:
@@ -548,199 +296,155 @@ def obtener_titulo(raiz):
     return "Título no disponible"
 
 
-def obtener_solicitantes(raiz):
+def obtener_nombres(
+    raiz,
+    nombre_bloque,
+    nombre_persona,
+):
     resultado = []
     vistos = set()
 
-    for bloque in elementos_por_nombre(
+    for bloque in elementos(
         raiz,
-        "B710",
+        nombre_bloque,
     ):
-        for persona in elementos_por_nombre(
+        for persona in elementos(
             bloque,
-            "B711",
+            nombre_persona,
         ):
-            for elemento in elementos_por_nombre(
+            for campo in elementos(
                 persona,
                 "snm",
             ):
                 nombre = limpiar(
-                    "".join(
-                        elemento.itertext()
-                    )
+                    "".join(campo.itertext())
                 )
 
                 clave = nombre.casefold()
 
-                if (
-                    nombre
-                    and clave not in vistos
-                ):
+                if nombre and clave not in vistos:
                     vistos.add(clave)
                     resultado.append(nombre)
 
-    return resultado[:20]
+    return resultado
 
 
-def obtener_inventores(raiz):
-    resultado = []
-    vistos = set()
+def clasificar_tipo(codigo):
+    tipos = {
+        "A1": "NUEVA SOLICITUD",
+        "A2": "SOLICITUD SIN INFORME DE BÚSQUEDA",
+        "A3": "INFORME DE BÚSQUEDA",
+        "A8": "CORRECCIÓN DE SOLICITUD",
+        "A9": "CORRECCIÓN DE SOLICITUD",
+        "B1": "PATENTE CONCEDIDA",
+        "B2": "PATENTE MODIFICADA",
+        "B3": "PATENTE MODIFICADA",
+        "B8": "CORRECCIÓN DE PATENTE",
+        "B9": "CORRECCIÓN DE PATENTE",
+    }
 
-    for bloque in elementos_por_nombre(
-        raiz,
-        "B720",
-    ):
-        for persona in elementos_por_nombre(
-            bloque,
-            "B721",
-        ):
-            for elemento in elementos_por_nombre(
-                persona,
-                "snm",
-            ):
-                nombre = limpiar(
-                    "".join(
-                        elemento.itertext()
-                    )
-                )
-
-                clave = nombre.casefold()
-
-                if (
-                    nombre
-                    and clave not in vistos
-                ):
-                    vistos.add(clave)
-                    resultado.append(nombre)
-
-    return resultado[:30]
+    return tipos.get(
+        codigo,
+        f"PUBLICACIÓN {codigo}".strip(),
+    )
 
 
-def descargar_publicacion(
+def procesar_publicacion(
     identificador,
     fecha_semanal,
 ):
-    url_xml = (
-        f"{BASE_API}/patents/"
-        f"{identificador}/document.xml"
-    )
-
-    sesion = crear_sesion()
-
     try:
-        respuesta = descargar_con_reintentos(
-            sesion,
+        url_xml = (
+            f"{BASE}/patents/"
+            f"{identificador}/document.xml"
+        )
+
+        respuesta = descargar(
+            crear_sesion(),
             url_xml,
-            intentos=3,
         )
 
         raiz = ET.fromstring(
             respuesta.content
         )
 
-        codigo = obtener_codigo_publicacion(
+        codigo = obtener_codigo(
             raiz,
             identificador,
         )
 
-        numero = obtener_numero_publicacion(
+        numero = obtener_numero(
             raiz,
             identificador,
         )
 
-        fecha = obtener_fecha_documento(
+        fecha = obtener_fecha(
             raiz,
             fecha_semanal,
         )
 
-        titulo = obtener_titulo(
-            raiz
+        titulo = obtener_titulo(raiz)
+
+        solicitantes = obtener_nombres(
+            raiz,
+            "B710",
+            "B711",
+        )[:20]
+
+        inventores = obtener_nombres(
+            raiz,
+            "B720",
+            "B721",
+        )[:30]
+
+        solicitante_principal = (
+            solicitantes[0]
+            if solicitantes
+            else "Solicitante no indicado"
         )
 
-        solicitantes = obtener_solicitantes(
-            raiz
-        )
-
-        inventores = obtener_inventores(
-            raiz
-        )
-
-        if solicitantes:
-            solicitante_principal = (
-                solicitantes[0]
-            )
-
-        else:
-            solicitante_principal = (
-                "Solicitante no indicado"
-            )
-
-        tipo = clasificar_tipo(
-            codigo
-        )
+        tipo = clasificar_tipo(codigo)
 
         numero_completo = (
             f"EP{numero} {codigo}"
         ).strip()
 
-        url_html = (
-            f"{BASE_API}/patents/"
+        url_documento = (
+            f"{BASE}/patents/"
             f"{identificador}/document.html"
         )
-
-        titulo_rss = (
-            f"{tipo} | "
-            f"{solicitante_principal} | "
-            f"{titulo} | "
-            f"{numero_completo}"
-        )
-
-        if solicitantes:
-            solicitantes_html = (
-                "<br>".join(
-                    html.escape(nombre)
-                    for nombre
-                    in solicitantes
-                )
-            )
-
-        else:
-            solicitantes_html = (
-                "No indicado"
-            )
-
-        if inventores:
-            inventores_html = (
-                "<br>".join(
-                    html.escape(nombre)
-                    for nombre
-                    in inventores
-                )
-            )
-
-        else:
-            inventores_html = (
-                "No indicados"
-            )
 
         fecha_visible = (
             f"{fecha[6:8]}/"
             f"{fecha[4:6]}/"
-            f"{fecha[0:4]}"
+            f"{fecha[:4]}"
+        )
+
+        solicitantes_html = (
+            "<br>".join(
+                html.escape(nombre)
+                for nombre in solicitantes
+            )
+            or "No indicado"
+        )
+
+        inventores_html = (
+            "<br>".join(
+                html.escape(nombre)
+                for nombre in inventores
+            )
+            or "No indicados"
         )
 
         descripcion = (
             f"<p><strong>Tipo:</strong> "
             f"{html.escape(tipo)}</p>"
 
-            f"<p><strong>"
-            f"Solicitante/titular:"
-            f"</strong><br>"
-            f"{solicitantes_html}</p>"
+            f"<p><strong>Solicitante/titular:"
+            f"</strong><br>{solicitantes_html}</p>"
 
-            f"<p><strong>Inventores:"
-            f"</strong><br>"
-            f"{inventores_html}</p>"
+            f"<p><strong>Inventores:</strong>"
+            f"<br>{inventores_html}</p>"
 
             f"<p><strong>Título:</strong> "
             f"{html.escape(titulo)}</p>"
@@ -751,16 +455,23 @@ def descargar_publicacion(
             f"<p><strong>Fecha:</strong> "
             f"{fecha_visible}</p>"
 
-            f'<p><a href="'
-            f'{html.escape(url_html)}">'
-            f"Abrir publicación oficial "
-            f"en la EPO"
+            f'<p><a href="{html.escape(url_documento)}">'
+            f"Abrir publicación oficial en la EPO"
             f"</a></p>"
+        )
+
+        fecha_datetime = datetime(
+            int(fecha[:4]),
+            int(fecha[4:6]),
+            int(fecha[6:8]),
+            14,
+            0,
+            tzinfo=MADRID,
         )
 
         identificador_rss = hashlib.sha256(
             (
-                "epo-publicacion-corregida-v2|"
+                "epo-publicacion-v2|"
                 f"{identificador}"
             ).encode("utf-8")
         ).hexdigest()
@@ -768,15 +479,16 @@ def descargar_publicacion(
         return {
             "id": identificador_rss,
             "identificador_epo": identificador,
-            "titulo": titulo_rss,
-            "url": url_html,
+            "titulo": (
+                f"{tipo} | "
+                f"{solicitante_principal} | "
+                f"{titulo} | "
+                f"{numero_completo}"
+            ),
+            "url": url_documento,
             "descripcion": descripcion,
-            "fecha": fecha_iso_desde_epo(
-                fecha
-            ).isoformat(),
-            "fecha_epo": fecha,
+            "fecha": fecha_datetime.isoformat(),
             "tipo": tipo,
-            "codigo": codigo,
             "numero": numero_completo,
             "solicitantes": solicitantes,
             "inventores": inventores,
@@ -784,8 +496,7 @@ def descargar_publicacion(
 
     except Exception as error:
         print(
-            f"ERROR {identificador}: "
-            f"{error}"
+            f"ERROR {identificador}: {error}"
         )
 
         return None
@@ -796,81 +507,63 @@ def descargar_publicaciones(
     fecha,
 ):
     publicaciones = []
-    total = len(identificadores)
 
     with ThreadPoolExecutor(
-        max_workers=MAXIMO_TRABAJADORES
+        max_workers=TRABAJADORES
     ) as ejecutor:
-        tareas = {
+
+        tareas = [
             ejecutor.submit(
-                descargar_publicacion,
+                procesar_publicacion,
                 identificador,
                 fecha,
-            ): identificador
-            for identificador
-            in identificadores
-        }
+            )
+            for identificador in identificadores
+        ]
 
-        completadas = 0
+        total = len(tareas)
 
-        for tarea in as_completed(
-            tareas
+        for numero, tarea in enumerate(
+            as_completed(tareas),
+            1,
         ):
-            completadas += 1
+            resultado = tarea.result()
 
-            publicacion = tarea.result()
-
-            if publicacion:
-                publicaciones.append(
-                    publicacion
-                )
+            if resultado:
+                publicaciones.append(resultado)
 
             if (
-                completadas % 25 == 0
-                or completadas == total
+                numero % 25 == 0
+                or numero == total
             ):
                 print(
-                    "Documentos procesados: "
-                    f"{completadas}/{total}"
+                    f"Procesadas: "
+                    f"{numero}/{total}"
                 )
 
     publicaciones.sort(
-        key=lambda elemento: (
+        key=lambda entrada: (
             (
-                elemento.get(
-                    "solicitantes"
-                )
-                or [
-                    "Solicitante no indicado"
-                ]
+                entrada.get("solicitantes")
+                or [""]
             )[0].casefold(),
-            elemento.get(
-                "numero",
-                "",
-            ),
+            entrada["numero"],
         )
     )
 
     return publicaciones
 
 
-# ============================================================
-# HISTORIAL
-# ============================================================
-
 def cargar_historial():
-    if not ARCHIVO_HISTORIAL.exists():
-        return []
-
     try:
-        contenido = json.loads(
+        datos = json.loads(
             ARCHIVO_HISTORIAL.read_text(
                 encoding="utf-8"
             )
         )
 
-        if isinstance(contenido, list):
-            return contenido
+        if isinstance(datos, list):
+            return datos
 
     except (
         OSError,
@@ -885,70 +578,60 @@ def mezclar_publicaciones(
     nuevas,
     anteriores,
 ):
-    por_id = {}
+    publicaciones_unicas = {}
 
-    for publicacion in anteriores:
-        identificador = publicacion.get(
+    for entrada in anteriores:
+        identificador = entrada.get(
             "identificador_epo"
         )
 
         if identificador:
-            por_id[identificador] = (
-                publicacion
-            )
+            publicaciones_unicas[
+                identificador
+            ] = entrada
 
-    for publicacion in nuevas:
-        identificador = publicacion[
+    for entrada in nuevas:
+        identificador = entrada.get(
             "identificador_epo"
-        ]
-
-        por_id[identificador] = (
-            publicacion
         )
 
+        if identificador:
+            publicaciones_unicas[
+                identificador
+            ] = entrada
+
     resultado = list(
-        por_id.values()
+        publicaciones_unicas.values()
     )
 
     resultado.sort(
-        key=lambda elemento: elemento.get(
+        key=lambda entrada: entrada.get(
             "fecha",
             "",
         ),
         reverse=True,
     )
 
-    return resultado[
-        :MAXIMO_ENTRADAS_RSS
-    ]
+    return resultado[:MAX_ENTRADAS]
 
 
-def guardar_historial(publicaciones):
-    ARCHIVO_HISTORIAL.write_text(
-        json.dumps(
-            publicaciones,
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
+def convertir_fecha_rss(fecha):
+    return format_datetime(
+        fecha.astimezone(timezone.utc)
     )
 
 
-# ============================================================
-# CREACIÓN DEL RSS
-# ============================================================
-
 def crear_rss(publicaciones):
+    atom = "http://www.w3.org/2005/Atom"
+
     ET.register_namespace(
         "atom",
-        "http://www.w3.org/2005/Atom",
+        atom,
     )
 
     rss = ET.Element(
         "rss",
-        {
-            "version": "2.0"
-        },
+        {"version": "2.0"},
     )
 
     canal = ET.SubElement(
@@ -960,21 +643,22 @@ def crear_rss(publicaciones):
         canal,
         "title",
     ).text = (
-        "Nuevas publicaciones EPO"
+        "Nuevas publicaciones EPO "
+        "- solicitantes y títulos"
     )
 
     ET.SubElement(
         canal,
         "link",
-    ).text = URL_EPO
+    ).text = URL_RSS
 
     ET.SubElement(
         canal,
         "description",
     ).text = (
-        "Solicitudes, patentes concedidas "
-        "y correcciones publicadas por la "
-        "Oficina Europea de Patentes."
+        "Publicaciones de la Oficina Europea "
+        "de Patentes clasificadas por "
+        "solicitante, título y número."
     )
 
     ET.SubElement(
@@ -985,10 +669,8 @@ def crear_rss(publicaciones):
     ET.SubElement(
         canal,
         "lastBuildDate",
-    ).text = fecha_rss(
-        datetime.now(
-            timezone.utc
-        )
+    ).text = convertir_fecha_rss(
+        datetime.now(timezone.utc)
     )
 
     ET.SubElement(
@@ -998,7 +680,7 @@ def crear_rss(publicaciones):
 
     ET.SubElement(
         canal,
-        "{http://www.w3.org/2005/Atom}link",
+        f"{{{atom}}}link",
         {
             "href": URL_RSS,
             "rel": "self",
@@ -1015,26 +697,18 @@ def crear_rss(publicaciones):
         ET.SubElement(
             item,
             "title",
-        ).text = publicacion[
-            "titulo"
-        ]
+        ).text = publicacion["titulo"]
 
         ET.SubElement(
             item,
             "link",
-        ).text = publicacion[
-            "url"
-        ]
+        ).text = publicacion["url"]
 
         ET.SubElement(
             item,
             "guid",
-            {
-                "isPermaLink": "false"
-            },
-        ).text = publicacion[
-            "id"
-        ]
+            {"isPermaLink": "false"},
+        ).text = publicacion["id"]
 
         fecha = datetime.fromisoformat(
             publicacion["fecha"]
@@ -1043,16 +717,12 @@ def crear_rss(publicaciones):
         ET.SubElement(
             item,
             "pubDate",
-        ).text = fecha_rss(
-            fecha
-        )
+        ).text = convertir_fecha_rss(fecha)
 
         ET.SubElement(
             item,
             "description",
-        ).text = publicacion[
-            "descripcion"
-        ]
+        ).text = publicacion["descripcion"]
 
         ET.SubElement(
             item,
@@ -1062,18 +732,7 @@ def crear_rss(publicaciones):
             "EPO",
         )
 
-        for solicitante in publicacion.get(
-            "solicitantes",
-            [],
-        ):
-            ET.SubElement(
-                item,
-                "category",
-            ).text = solicitante
-
-    arbol = ET.ElementTree(
-        rss
-    )
+    arbol = ET.ElementTree(rss)
 
     ET.indent(
         arbol,
@@ -1086,42 +745,29 @@ def crear_rss(publicaciones):
         xml_declaration=True,
     )
 
-    ET.parse(
-        ARCHIVO_RSS
-    )
+    ET.parse(ARCHIVO_RSS)
 
     print(
-        f"feed.xml generado: "
-        f"{ARCHIVO_RSS.stat().st_size} "
-        "bytes"
+        f"{ARCHIVO_RSS} generado: "
+        f"{ARCHIVO_RSS.stat().st_size} bytes"
     )
 
-
-# ============================================================
-# PROGRAMA PRINCIPAL
-# ============================================================
 
 def main():
     print(
-        "========================================"
+        "======================================"
     )
-
     print(
-        "NUEVAS PUBLICACIONES EPO"
+        "NUEVAS PUBLICACIONES EPO V2"
     )
-
     print(
-        "========================================"
+        "======================================"
     )
 
-    fecha = (
-        obtener_ultima_fecha_publicacion()
-    )
+    fecha = obtener_ultima_fecha()
 
-    identificadores = (
-        obtener_listado_semanal(
-            fecha
-        )
+    identificadores = obtener_listado(
+        fecha
     )
 
     nuevas = descargar_publicaciones(
@@ -1131,56 +777,37 @@ def main():
 
     if not nuevas:
         raise RuntimeError(
-            "No se pudo extraer ninguna "
-            "publicación de la EPO."
+            "No se pudo procesar ninguna publicación"
         )
 
     anteriores = cargar_historial()
 
-    resultado = mezclar_publicaciones(
+    todas = mezclar_publicaciones(
         nuevas,
         anteriores,
     )
 
-    guardar_historial(
-        resultado
+    ARCHIVO_HISTORIAL.write_text(
+        json.dumps(
+            todas,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
     )
 
-    crear_rss(
-        resultado
-    )
-
-    print("")
+    crear_rss(todas)
 
     print(
-        "Proceso finalizado correctamente."
-    )
-
-    print(
-        "Publicaciones semanales: "
+        f"Entradas nuevas procesadas: "
         f"{len(nuevas)}"
     )
 
     print(
-        "Entradas guardadas: "
-        f"{len(resultado)}"
-    )
-
-    print(
-        f"URL para Feedly: {URL_RSS}"
+        f"Entradas totales en RSS: "
+        f"{len(todas)}"
     )
 
 
 if __name__ == "__main__":
-    try:
-        main()
-
-    except Exception as error:
-        print(
-            f"ERROR: "
-            f"{type(error).__name__}: "
-            f"{error}",
-            file=sys.stderr,
-        )
-
-        sys.exit(1)
+    main()
