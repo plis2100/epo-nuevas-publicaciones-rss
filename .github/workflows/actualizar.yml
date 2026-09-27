@@ -1,18 +1,17 @@
-name: Actualizar publicaciones EPO
+name: Actualizar publicaciones EPO v2
 
 on:
   workflow_dispatch:
 
   schedule:
-    # Miércoles a las 13:30 UTC.
-    # España: 14:30 en invierno y 15:30 en verano.
-    - cron: "30 13 * * 3"
+    # Miércoles a las 14:05 UTC
+    - cron: "5 14 * * 3"
 
 permissions:
   contents: write
 
 concurrency:
-  group: actualizar-publicaciones-epo
+  group: actualizar-publicaciones-epo-v2
   cancel-in-progress: true
 
 jobs:
@@ -35,31 +34,29 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Crear RSS
+      - name: Crear RSS nuevo
         run: |
           python actualizar_rss.py
 
-      - name: Comprobar RSS
+      - name: Comprobar RSS nuevo
         run: |
           python - <<'PY'
           from pathlib import Path
           from xml.etree import ElementTree as ET
 
-          archivo = Path("feed.xml")
+          archivo = Path("epo-feed-v2.xml")
 
           if not archivo.exists():
               raise SystemExit(
-                  "ERROR: feed.xml no existe"
+                  "ERROR: epo-feed-v2.xml no existe"
               )
 
           if archivo.stat().st_size == 0:
               raise SystemExit(
-                  "ERROR: feed.xml está vacío"
+                  "ERROR: epo-feed-v2.xml está vacío"
               )
 
-          raiz = ET.parse(
-              archivo
-          ).getroot()
+          raiz = ET.parse(archivo).getroot()
 
           entradas = raiz.findall(
               "./channel/item"
@@ -79,27 +76,48 @@ jobs:
                   "ERROR: el RSS no tiene entradas"
               )
 
-          print(
-              "Primera entrada:"
-          )
-          print(
-              entradas[0].findtext(
-                  "title"
+          titulos = [
+              entrada.findtext("title", "")
+              for entrada in entradas
+          ]
+
+          correctos = [
+              titulo
+              for titulo in titulos
+              if (
+                  "Solicitante no indicado"
+                  not in titulo
+                  and "Título no disponible"
+                  not in titulo
               )
+          ]
+
+          print(
+              f"Entradas con solicitante "
+              f"y título: {len(correctos)}"
           )
+
+          if not correctos:
+              raise SystemExit(
+                  "ERROR: ninguna entrada contiene "
+                  "solicitante y título"
+              )
+
+          print("Primera entrada correcta:")
+          print(correctos[0])
           PY
 
-      - name: Guardar RSS
+      - name: Guardar RSS nuevo
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "4189826+github-actions[bot]@users.noreply.github.com"
 
-          git add feed.xml historial.json
+          git add epo-feed-v2.xml historial.json
 
           if git diff --cached --quiet; then
             echo "No hay cambios."
           else
-            git commit -m "Actualizar publicaciones EPO"
+            git commit -m "Actualizar publicaciones EPO v2"
             git push
           fi
