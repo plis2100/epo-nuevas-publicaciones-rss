@@ -5,7 +5,7 @@
     <link>https://raw.githubusercontent.com/plis2100/epo-nuevas-publicaciones-rss/main/epo-feed-v2.xml</link>
     <description>Publicaciones de la Oficina Europea de Patentes clasificadas por solicitante, título y número.</description>
     <language>es-ES</language>
-    <lastBuildDate>Wed, 18 Nov 2026 21:50:42 +0000</lastBuildDate>
+    <lastBuildDate>Wed, 25 Nov 2026 23:03:19 +0000</lastBuildDate>
     <ttl>10080</ttl>
     <atom:link href="https://raw.githubusercontent.com/plis2100/epo-nuevas-publicaciones-rss/main/epo-feed-v2.xml" rel="self" type="application/rss+xml" />
     <item>
